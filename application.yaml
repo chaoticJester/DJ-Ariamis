@@ -1,0 +1,37 @@
+server:
+  port: 2333
+  address: 0.0.0.0
+
+lavalink:
+  plugins:
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.17.0"
+      repository: "https://maven.lavalink.dev/releases"
+    - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.3.0"
+      repository: "https://maven.lavalink.dev/releases"
+  server:
+    password: "rattunnel123"
+    sources:
+      youtube: false # ปิดอันเก่า
+      bandcamp: true
+      soundcloud: true
+      twitch: true
+      vimeo: true
+      http: true
+
+plugins:
+  youtube:
+    enabled: true
+    clients:
+      - "MUSIC"
+      - "ANDROID_VR"
+      - "WEB"
+      - "TVHTML5EMBEDDED"
+  lavasrc:
+    providers:
+      - "ytsearch:\"%ISRC%\"" # ให้มันแอบไปหาเสียงจาก YouTube Music โดยอิงจากรหัสเพลง Spotify
+      - "ytsearch:%QUERY%" 
+    sources:
+      spotify: false  
+      applemusic: false
+      deezer: false
+      yandexmusic: false
