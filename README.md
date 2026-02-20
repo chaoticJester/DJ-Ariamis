@@ -9,3 +9,10 @@ java -jar Lavalink.jar
 ```bash
 node index.js
 ```
+
+วิธีเล่นเพลง
+```bash
+!play [ชื่อเพลง | url เพลง]
+```
+```
+```

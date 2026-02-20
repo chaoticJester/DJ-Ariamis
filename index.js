@@ -149,7 +149,7 @@ client.on('messageCreate', async message => {
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
-    // เช็คว่าผู้ใช้พิมพ์ !disconnect หรือ !leave (ให้ใช้ได้ทั้ง 2 คำ)
+    // เช็คว่าผู้ใช้พิมพ์ !disconnect 
     if (message.content === '!disconnect') {
         
         // เช็คก่อนว่าบอทมี Player ทำงานอยู่ในเซิร์ฟเวอร์นี้ไหม
