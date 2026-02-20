@@ -24,6 +24,7 @@ shoukaku.on('error', (_, error) => console.error('Shoukaku Error:', error));
 shoukaku.on('ready', (name) => console.log(`Lavalink Node: ${name} is now connected`));
 
 const queues = new Map();
+const leaveTimeouts = new Map();
 
 // เมื่อบอทพร้อมทำงาน
 client.once('ready', async () => {
@@ -53,25 +54,23 @@ client.once('ready', async () => {
     console.log('ลงทะเบียน Slash Commands เรียบร้อยแล้ว!');
 });
 
-// ระบบรับ Slash Commands
+// Slash commands
 client.on('interactionCreate', async interaction => {
-    // ถ้าไม่ใช่ Slash Command ให้ข้ามไป
     if (!interaction.isChatInputCommand()) return;
 
     const { commandName } = interaction;
 
     if (commandName === 'play') {
-        await musicCommands.executePlay(interaction, shoukaku, queues);
+        await musicCommands.executePlay(interaction, shoukaku, queues, leaveTimeouts);
     } 
     else if (commandName === 'queue') {
         await musicCommands.executeQueue(interaction, queues);
     } 
     else if (commandName === 'skip') {
-        await musicCommands.executeSkip(interaction, shoukaku, queues);
+        await musicCommands.executeSkip(interaction, shoukaku, queues, leaveTimeouts);
     } 
     else if (commandName === 'disconnect') {
-        await musicCommands.executeDisconnect(interaction, shoukaku, queues);
+        await musicCommands.executeDisconnect(interaction, shoukaku, queues, leaveTimeouts);
     }
 });
-
 client.login(process.env.TOKEN);

@@ -1,11 +1,39 @@
-async function executePlay(interaction, shoukaku, queues) {
-    // บอก Discord ว่าขอเวลาประมวลผลแป๊บนึง (ป้องกัน Error Timeout)
+// ฟังก์ชันช่วย: ยกเลิกการจับเวลา (เมื่อมีคนสั่งเพลงใหม่)
+function clearLeaveTimer(guildId, leaveTimeouts) {
+    if (leaveTimeouts.has(guildId)) {
+        clearTimeout(leaveTimeouts.get(guildId));
+        leaveTimeouts.delete(guildId);
+    }
+}
+
+// ฟังก์ชันช่วย: เริ่มจับเวลา 5 นาที
+function startLeaveTimer(guildId, shoukaku, queues, leaveTimeouts, channel) {
+    clearLeaveTimer(guildId, leaveTimeouts); // ล้างของเก่าก่อนเผื่อบัค
+    
+    const timeout = setTimeout(async () => {
+        const player = shoukaku.players.get(guildId);
+        if (player) {
+            await shoukaku.leaveVoiceChannel(guildId);
+            queues.delete(guildId);
+            leaveTimeouts.delete(guildId);
+            channel.send('ไม่มีเพลงเล่นเกิน 5 นาที ผมขอตัวออกจากห้องก่อนนะครับ บาย');
+            console.log(`[Auto-Leave] ออกจากห้อง ${guildId} เพราะไม่มีเพลงเล่น`);
+        }
+    }, 5 * 60 * 1000); // 5 นาที (หน่วยเป็นมิลลิวินาที: 5 * 60 วินาที * 1000)
+
+    leaveTimeouts.set(guildId, timeout);
+}
+
+// ==========================================
+
+async function executePlay(interaction, shoukaku, queues, leaveTimeouts) {
     await interaction.deferReply();
 
-    // ดึงชื่อเพลงที่พิมพ์ในช่อง Slash Command
-    const query = interaction.options.getString('song'); 
+    clearLeaveTimer(interaction.guildId, leaveTimeouts);
 
+    const query = interaction.options.getString('song'); 
     const voiceChannel = interaction.member.voice.channel;
+    
     if (!voiceChannel) return interaction.editReply('คุณต้องเข้าห้องเสียง (Voice Channel) ก่อนครับ!');
 
     const node = shoukaku.options.nodeResolver(shoukaku.nodes);
@@ -16,7 +44,6 @@ async function executePlay(interaction, shoukaku, queues) {
         let result = null; 
 
         if (isUrl) {
-            console.log(`ค้นหาจาก URL โดยตรง...`);
             result = await node.rest.resolve(query);
         } else {
             const searchPrefixes = ['ytmsearch:', 'ytsearch:', 'scsearch:'];
@@ -49,7 +76,7 @@ async function executePlay(interaction, shoukaku, queues) {
         const newTrack = {
             encoded: trackToPlay,
             title: title,
-            requester: interaction.user.username // เปลี่ยนจาก message.author เป็น interaction.user
+            requester: interaction.user.username 
         };
 
         if(!queues.has(interaction.guildId)) {
@@ -62,7 +89,6 @@ async function executePlay(interaction, shoukaku, queues) {
         let player = shoukaku.players.get(interaction.guildId);
 
         if(!player) {
-            console.log('อลันยังไม่ได้อยู่ในห้อง กำลังส่งเขาเข้าไป');
             player = await shoukaku.joinVoiceChannel({
                 guildId: interaction.guildId,
                 channelId: voiceChannel.id,
@@ -70,7 +96,6 @@ async function executePlay(interaction, shoukaku, queues) {
             });
 
             player.on('end', (payload) => {
-                console.log(`เพลงเล่นจบแล้ว [Reason: ${payload.reason}]`);
                 if(payload.reason == 'finished') {
                     serverQueue.shift();
                     if(serverQueue.length > 0) {
@@ -78,7 +103,8 @@ async function executePlay(interaction, shoukaku, queues) {
                         player.playTrack({track : { encoded: nextTrack.encoded }});
                         interaction.channel.send(`กำลังเล่น **${serverQueue[0].title}** นะ\nรีเควสโดย ***${serverQueue[0].requester}***`);
                     } else {
-                        interaction.channel.send('คิวเพลงหมดแล้วนะครับ'); 
+                        interaction.channel.send('คิวเพลงหมดแล้วนะครับ (ถ้าไม่มีเพลงเพิ่มใน 5 นาทีผมจะออกจากห้องนะ)'); 
+                        startLeaveTimer(interaction.guildId, shoukaku, queues, leaveTimeouts, interaction.channel);
                     }
                 }
             });
@@ -88,7 +114,6 @@ async function executePlay(interaction, shoukaku, queues) {
 
         if(serverQueue.length == 1) {
             await player.playTrack({track: {encoded: serverQueue[0].encoded}});
-            // แก้ไขข้อความโหลดเป็นเพลงที่กำลังเล่น
             interaction.editReply(`กำลังเล่น **${serverQueue[0].title}** นะ\nรีเควสโดย ***${serverQueue[0].requester}***`);
         } else {
             interaction.editReply(`เพิ่มเพลง **${newTrack.title}** ลงคิวแล้วนะ`);
@@ -104,7 +129,7 @@ async function executeQueue(interaction, queues) {
     const serverQueue = queues.get(interaction.guildId);
 
     if(!serverQueue || serverQueue.length <= 1) {
-        return interaction.reply('ตอนนี้ยังไม่มีคิวครับ'); // คำสั่งที่เร็ว ใช้ reply ได้เลยไม่ต้อง defer
+        return interaction.reply('ตอนนี้ยังไม่มีคิวครับ'); 
     }
 
     let queueString = "**รายการเพลงในคิว:**\n";
@@ -115,7 +140,7 @@ async function executeQueue(interaction, queues) {
     interaction.reply(queueString);
 }
 
-async function executeSkip(interaction, shoukaku, queues) {
+async function executeSkip(interaction, shoukaku, queues, leaveTimeouts) {
     const player = shoukaku.players.get(interaction.guildId);
     if (!player) return interaction.reply({ content: 'ตอนนี้บอทยังไม่ได้เล่นเพลงอะไรเลยครับ!', ephemeral: true });
 
@@ -139,11 +164,13 @@ async function executeSkip(interaction, shoukaku, queues) {
         await player.playTrack({ track: { encoded: nextTrack.encoded } });
     } else {
         await player.stopTrack();
-        interaction.reply('️มีคนสั่งข้ามเพลง ตอนนี้คิวว่างเปล่าแล้วครับ');
+        interaction.reply('️มีคนสั่งข้ามเพลง ตอนนี้คิวว่างเปล่าแล้วครับ (เริ่มจับเวลา 5 นาที)');
+        
+        startLeaveTimer(interaction.guildId, shoukaku, queues, leaveTimeouts, interaction.channel);
     }
 }
 
-async function executeDisconnect(interaction, shoukaku, queues) {
+async function executeDisconnect(interaction, shoukaku, queues, leaveTimeouts) {
     const player = shoukaku.players.get(interaction.guildId);
     if (!player) return interaction.reply({ content: 'บอทยังไม่ได้อยู่ในห้องเสียงเลยครับ!', ephemeral: true });
 
@@ -153,6 +180,8 @@ async function executeDisconnect(interaction, shoukaku, queues) {
     if (!userVoiceChannel || (botVoiceChannel && userVoiceChannel.id !== botVoiceChannel.id)) {
         return interaction.reply({ content: 'คุณต้องอยู่ในห้องเสียงเดียวกับผมถึงจะสั่งให้ออกได้ครับ!', ephemeral: true });
     }
+
+    clearLeaveTimer(interaction.guildId, leaveTimeouts);
 
     queues.delete(interaction.guildId);
     await shoukaku.leaveVoiceChannel(interaction.guildId);
