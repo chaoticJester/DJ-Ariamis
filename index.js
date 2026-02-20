@@ -3,7 +3,7 @@ const { Shoukaku, Connectors } = require('shoukaku');
 
 require('dotenv').config();
 
-// 1. ตั้งค่าบอทและ Intents (สิทธิ์การเข้าถึงข้อมูล)
+// ตั้งค่าบอทและ Intents (สิทธิ์การเข้าถึงข้อมูล)
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -13,25 +13,28 @@ const client = new Client({
     ]
 });
 
-// 2. ตั้งค่าการเชื่อมต่อไปยัง Lavalink
+// ตั้งค่าการเชื่อมต่อไปยัง Lavalink
 const nodes = [{
     name: 'Ariamis Trianglecat The Grandmaster',
     url: 'localhost:2333',
     auth: process.env.LAVALINK_PASS 
 }];
 
-// 3. เริ่มต้น Shoukaku
+// เริ่มต้น Shoukaku
 const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), nodes);
 
 shoukaku.on('error', (_, error) => console.error('Shoukaku Error:', error));
 shoukaku.on('ready', (name) => console.log(`Lavalink Node: ${name} is now connected`));
 
-// 4. เมื่อบอทพร้อมทำงาน
+const queues = new Map();
+
+
+// เมื่อบอทพร้อมทำงาน
 client.once('clientready', () => {
     console.log(`Alan is now on ${client.user.tag}!`);
 });
 
-// 5. ระบบคำสั่งเล่นเพลงพื้นฐาน (!play)
+// ระบบคำสั่งเล่นเพลงพื้นฐาน (!play)
 client.on('messageCreate', async message => {
     // ป้องกันบอทคุยกันเอง หรือคำสั่งที่ไม่ได้เริ่มด้วย !play
     if (message.author.bot || !message.content.startsWith('!play')) return;
@@ -94,49 +97,60 @@ client.on('messageCreate', async message => {
             title = result.data.info.title;
         }
 
-        console.log(`${trackToPlay ? 'มีข้อมูลพร้อมส่ง' : 'ว่างเปล่า (Undefined)'}`);
+        // สร้าง object เก็บเพลง
+        const newTrack = {
+            encoded: trackToPlay,
+            title: title,
+            requester: message.author.username
+        };
 
-        // ดักจับถ้า trackToPlay ว่างเปล่า จะได้ไม่ส่งไปหา Lavalink ให้เกิด Error 400
-        if (!trackToPlay) {
-            return message.reply('เกิดข้อผิดพลาด: ไม่สามารถดึงรหัสเพลง (Encoded Track) ได้');
+        if(!queues.has(message.guild.id)) {
+            queues.set(message.guild.id, []);
         }
 
-        // ให้บอทเช็คว่าตัวเองอยู่ในห้องเสียงของเซิร์ฟเวอร์นี้หรือยัง?
+        const serverQueue = queues.get(message.guild.id);
+
+        serverQueue.push(newTrack);
+
         let player = shoukaku.players.get(message.guild.id);
-        
-        if (!player) {
-            console.log(`บอทยังไม่ได้อยู่ในห้อง กำลังทำการเชื่อมต่อ...`);
+
+        if(!player) {
+            console.log('อลันยังไม่ได้อยู่ในห้อง กำลังส่งเขาเข้าไป');
             player = await shoukaku.joinVoiceChannel({
                 guildId: message.guild.id,
                 channelId: voiceChannel.id,
                 shardId: message.guild.shardId || 0
             });
 
+            // Event ตอนเพลงเล่นจบ
             player.on('end', (payload) => {
-                console.log(`เพลงเล่นจบแล้ว! เหตุผล: ${payload.reason}`);
-                
-                // เช็คว่าจบแบบ "เล่นจนจบเพลงจริงๆ" (FINISHED) 
-                // ไม่ใช่โดนกดข้าม (REPLACED) หรือโดนสั่งหยุด (STOPPED)
-                if (payload.reason === 'FINISHED') {
-                    message.channel.send('เล่นเพลงจบแล้วครับ!');
-                    
-                    //TODO: เอาเพลงถัดไปมาเล่น 
+                console.log(`เพลงเล่นจบแล้ว [Reason: ${payload.reason}]`);
+
+                if(payload.reason == 'finished') {
+                    serverQueue.shift();
+
+                    if(serverQueue.length > 0) {
+                        const nextTrack = serverQueue[0];
+                        player.playTrack({track : { encoded: nextTrack.encoded }});
+                        console.log(`อลันกำลังเล่นเพลง ${serverQueue[0].title}`);
+                        message.channel.send(`กำลังเล่น **${serverQueue[0].title}** นะ\nรีเควสโดย ***${serverQueue[0].requester}***`);
+
+                    } else {
+                        message.channel.send('คิวเพลงหมดแล้วนะครับ'); 
+                    }
                 }
             });
 
-            player.on('error', (err) => {
-                console.error(`เกิดข้อผิดพลาดกับ Player:`, err);
-            });
-        } else {
-            console.log(`บอทอยู่ในห้องอยู่แล้ว ใช้การเชื่อมต่อเดิม`);
+            player.on('error', (err) => console.error('เกิดข้อผิดพลาดกับ Player: ', err));
         }
 
-        console.log(`ส่งคำสั่ง Play ไปที่ Lavalink...`);
-        
-        await player.playTrack({ track: { encoded: trackToPlay } });
-        
-        console.log(`บอทกำลังเล่นเพลง ${title}`);
-        message.reply(`กำลังเล่น: **${title}** นะ`);
+        if(serverQueue.length == 1) {
+            await player.playTrack({track: {encoded: serverQueue[0].encoded}});
+            console.log(`อลันกำลังเล่นเพลง ${serverQueue[0].title}`);
+            message.channel.send(`กำลังเล่น **${serverQueue[0].title}** นะ\nรีเควสโดย ***${serverQueue[0].requester}***`);
+        } else {
+            message.reply(`เพิ่มเพลง **${newTrack.title}** ลงคิวแล้วนะ`);
+        }
 
     } catch (error) {
         console.error(`\nเกิด Error ระบบ!`);
@@ -145,14 +159,79 @@ client.on('messageCreate', async message => {
     }
 });
 
-// 6. ระบบคำสั่งให้ออกจากห้อง (!disconnect หรือ !leave)
+// ระบบบอกคิวเพลง
+client.on('messageCreate', async message => {
+    if(message.author.bot) return;
+
+    if(message.content === '!queue') {
+
+        const serverQueue = queues.get(message.guild.id);
+
+        if(!serverQueue || serverQueue.length == 0) {
+            return message.reply('ตอนนี้ยังไม่มีคิวครับ');
+        }
+
+        let queueString = "**รายการเพลงในคิว:**\n";
+        for(let i = 1; i < serverQueue.length; i++) {
+            queueString += `${i}: ${serverQueue[i].title}\n`;
+        }
+
+        message.reply(queueString);
+        console.log("บอกคิวไปแล้วนะ")
+    }
+})
+
+// ระบบข้ามเพลง
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
-    // เช็คว่าผู้ใช้พิมพ์ !disconnect 
+    if (message.content === '!skip') {
+        // 1. ตรวจสอบว่าบอทกำลังทำงานในเซิร์ฟเวอร์นี้หรือไม่
+        const player = shoukaku.players.get(message.guild.id);
+        if (!player) {
+            return message.reply('ตอนนี้บอทยังไม่ได้เล่นเพลงอะไรเลยครับ!');
+        }
+
+        // 2. ตรวจสอบว่าผู้ใช้อยู่ในห้องเสียงเดียวกับบอทไหม
+        const userVoiceChannel = message.member.voice.channel;
+        const botVoiceChannel = message.guild.members.me.voice.channel;
+
+        if (!userVoiceChannel || (botVoiceChannel && userVoiceChannel.id !== botVoiceChannel.id)) {
+            return message.reply('คุณต้องอยู่ในห้องเสียงเดียวกับผมถึงจะสั่งข้ามเพลงได้ครับ!');
+        }
+
+        // 3. ดึงข้อมูลคิวของเซิร์ฟเวอร์
+        const serverQueue = queues.get(message.guild.id);
+
+        if (!serverQueue || serverQueue.length === 0) {
+            return message.reply('ไม่มีเพลงในคิวให้ข้ามครับ!');
+        }
+
+        // 4. นำเพลงที่กำลังเล่นอยู่ (คิวที่ 0) ออกจาก Array
+        serverQueue.shift();
+
+        // 5. เช็คว่ามีเพลงถัดไปรออยู่ไหม
+        if (serverQueue.length > 0) {
+            const nextTrack = serverQueue[0];
+            
+            // สั่งเล่นเพลงถัดไปทันที (Lavalink จะแทนที่เพลงเดิมให้เอง)
+            message.reply(`มีคนสั่งข้ามเพลง กำลังเล่นเพลงถัดไป: **${nextTrack.title}**`);
+            await player.playTrack({ track: { encoded: nextTrack.encoded } });
+            console.log(`อลันกำลังเล่นเพลง ${nextTrack.title}`);
+            message.channel.send(`กำลังเล่น **${serverQueue[0].title}** นะ\nรีเควสโดย ***${serverQueue[0].requester}***`);
+        } else {
+            // ถ้าคิวว่างเปล่าแล้ว ให้สั่งหยุดเล่น
+            await player.stopTrack();
+            message.reply('️มีคนสั่งข้ามเพลง ตอนนี้คิวว่างเปล่าแล้วครับ');
+        }
+    }
+});
+
+// ระบบคำสั่งให้ออกจากห้อง (!disconnect)
+client.on('messageCreate', async message => {
+    if (message.author.bot) return;
+
     if (message.content === '!disconnect') {
-        
-        // เช็คก่อนว่าบอทมี Player ทำงานอยู่ในเซิร์ฟเวอร์นี้ไหม
         const player = shoukaku.players.get(message.guild.id);
 
         if (!player) {
@@ -162,15 +241,16 @@ client.on('messageCreate', async message => {
         const userVoiceChannel = message.member.voice.channel;
         const botVoiceChannel = message.guild.members.me.voice.channel;
 
-        // ถ้าผู้ใช้ไม่ได้อยู่ห้องไหนเลย หรืออยู่คนละห้องกับบอท
         if (!userVoiceChannel || (botVoiceChannel && userVoiceChannel.id !== botVoiceChannel.id)) {
             return message.reply('คุณต้องอยู่ในห้องเสียงเดียวกับผมถึงจะสั่งให้ออกได้ครับ!');
         }
 
-        // สั่งทำลาย Player และออกจากห้องเสียง (คืนทรัพยากรให้ระบบ)
+        // ล้างคิวของเซิร์ฟเวอร์นี้ทิ้ง
+        queues.delete(message.guild.id);
+
         await shoukaku.leaveVoiceChannel(message.guild.id);
         
-        console.log(`ปิดระบบการใช้งาน`);
+        console.log(`ปิดระบบการใช้งานและล้างคิว`);
         return message.reply('ไปก่อนนะ บาย');
     }
 });
