@@ -1,4 +1,4 @@
-// ฟังก์ชันช่วย: ยกเลิกการจับเวลา (เมื่อมีคนสั่งเพลงใหม่)
+// ฟังก์ชันช่วย: ยกเลิกการจับเวลา
 function clearLeaveTimer(guildId, leaveTimeouts) {
     if (leaveTimeouts.has(guildId)) {
         clearTimeout(leaveTimeouts.get(guildId));
@@ -8,7 +8,7 @@ function clearLeaveTimer(guildId, leaveTimeouts) {
 
 // ฟังก์ชันช่วย: เริ่มจับเวลา 5 นาที
 function startLeaveTimer(guildId, shoukaku, queues, leaveTimeouts, channel) {
-    clearLeaveTimer(guildId, leaveTimeouts); // ล้างของเก่าก่อนเผื่อบัค
+    clearLeaveTimer(guildId, leaveTimeouts);
     
     const timeout = setTimeout(async () => {
         const player = shoukaku.players.get(guildId);
@@ -16,17 +16,17 @@ function startLeaveTimer(guildId, shoukaku, queues, leaveTimeouts, channel) {
             await shoukaku.leaveVoiceChannel(guildId);
             queues.delete(guildId);
             leaveTimeouts.delete(guildId);
-            channel.send('ไม่มีเพลงเล่นเกิน 5 นาที ผมขอตัวออกจากห้องก่อนนะครับ บาย');
+            channel.send('⏳ ไม่มีเพลงเล่นเกิน 5 นาที ผมขอตัวออกจากห้องก่อนนะครับ บาย');
             console.log(`[Auto-Leave] ออกจากห้อง ${guildId} เพราะไม่มีเพลงเล่น`);
         }
-    }, 5 * 60 * 1000); // 5 นาที (หน่วยเป็นมิลลิวินาที: 5 * 60 วินาที * 1000)
+    }, 5 * 60 * 1000);
 
     leaveTimeouts.set(guildId, timeout);
 }
 
 // ==========================================
 
-async function executePlay(interaction, shoukaku, queues, leaveTimeouts) {
+async function executePlay(interaction, shoukaku, queues, leaveTimeouts, loopModes) {
     await interaction.deferReply();
 
     clearLeaveTimer(interaction.guildId, leaveTimeouts);
@@ -96,8 +96,21 @@ async function executePlay(interaction, shoukaku, queues, leaveTimeouts) {
             });
 
             player.on('end', (payload) => {
-                if(payload.reason == 'finished') {
-                    serverQueue.shift();
+                if(payload.reason === 'finished') {
+                    const currentLoop = loopModes.get(interaction.guildId) || 'OFF';
+
+                    if (currentLoop === 'SONG') {
+                        // ไม่ต้องลบเพลงออกจากคิว (เก็บ serverQueue[0] ไว้เหมือนเดิม)
+                    } else if (currentLoop === 'QUEUE') {
+                        // ลบเพลงแรกออก แล้วเอาไปต่อท้ายคิว
+                        const finishedSong = serverQueue.shift();
+                        serverQueue.push(finishedSong);
+                    } else {
+                        // ปิดลูป: เอาเพลงแรกออกไปเลย
+                        serverQueue.shift();
+                    }
+
+                    // เช็คว่ามีเพลงให้เล่นต่อไหม
                     if(serverQueue.length > 0) {
                         const nextTrack = serverQueue[0];
                         player.playTrack({track : { encoded: nextTrack.encoded }});
@@ -112,7 +125,7 @@ async function executePlay(interaction, shoukaku, queues, leaveTimeouts) {
             player.on('error', (err) => console.error('เกิดข้อผิดพลาดกับ Player: ', err));
         }
 
-        if(serverQueue.length == 1) {
+        if(serverQueue.length === 1) { 
             await player.playTrack({track: {encoded: serverQueue[0].encoded}});
             interaction.editReply(`กำลังเล่น **${serverQueue[0].title}** นะ\nรีเควสโดย ***${serverQueue[0].requester}***`);
         } else {
@@ -133,6 +146,7 @@ async function executeQueue(interaction, queues) {
     }
 
     let queueString = "**รายการเพลงในคิว:**\n";
+    // เริ่มที่ 1 เพราะ index 0 คือเพลงที่กำลังเล่นอยู่
     for(let i = 1; i < serverQueue.length; i++) {
         queueString += `${i}: ${serverQueue[i].title}\n`;
     }
@@ -140,7 +154,7 @@ async function executeQueue(interaction, queues) {
     interaction.reply(queueString);
 }
 
-async function executeSkip(interaction, shoukaku, queues, leaveTimeouts) {
+async function executeSkip(interaction, shoukaku, queues, leaveTimeouts, loopModes) {
     const player = shoukaku.players.get(interaction.guildId);
     if (!player) return interaction.reply({ content: 'ตอนนี้บอทยังไม่ได้เล่นเพลงอะไรเลยครับ!', ephemeral: true });
 
@@ -156,21 +170,41 @@ async function executeSkip(interaction, shoukaku, queues, leaveTimeouts) {
         return interaction.reply('ไม่มีเพลงในคิวให้ข้ามครับ!');
     }
 
-    serverQueue.shift();
+    // ถ้าระบบลูปคิวอยู่ ข้ามเพลงก็ต้องเอาเพลงนี้ไปต่อท้ายด้วย
+    const currentLoop = loopModes.get(interaction.guildId) || 'OFF';
+    if (currentLoop === 'QUEUE') {
+        const skippedSong = serverQueue.shift();
+        serverQueue.push(skippedSong);
+    } else {
+        serverQueue.shift(); // นอกนั้นลบทิ้งไปเลย (แม้จะอยู่โหมด SONG สั่งข้ามก็ต้องไปเพลงต่อไป)
+    }
 
     if (serverQueue.length > 0) {
         const nextTrack = serverQueue[0];
-        interaction.reply(`มีคนสั่งข้ามเพลง กำลังเล่นเพลงถัดไป: **${nextTrack.title}**`);
+        interaction.reply(`มีคนสั่งข้ามเพลง กำลังเล่นเพลงถัดไป`);
+        interaction.channel.send(`เล่น **${nextTrack.title}** นะ\nรีเควสโดย ***${nextTrack.requester}***`);
         await player.playTrack({ track: { encoded: nextTrack.encoded } });
     } else {
         await player.stopTrack();
         interaction.reply('️มีคนสั่งข้ามเพลง ตอนนี้คิวว่างเปล่าแล้วครับ (เริ่มจับเวลา 5 นาที)');
-        
         startLeaveTimer(interaction.guildId, shoukaku, queues, leaveTimeouts, interaction.channel);
     }
 }
 
-async function executeDisconnect(interaction, shoukaku, queues, leaveTimeouts) {
+// ฟังก์ชัน Loop
+async function executeLoop(interaction, loopModes) {
+    const mode = interaction.options.getString('mode');
+    loopModes.set(interaction.guildId, mode);
+
+    let modeMessage = '';
+    if (mode === 'OFF') modeMessage = 'ปิดการวนซ้ำเรียบร้อยแล้ว';
+    if (mode === 'SONG') modeMessage = 'ตั้งค่วนซ้ำ **เพลงเดียว** เรียบร้อยแล้ว';
+    if (mode === 'QUEUE') modeMessage = 'ตั้งค่าวนซ้ำ **ทั้งคิว** เรียบร้อยแล้ว';
+
+    interaction.reply(modeMessage);
+}
+
+async function executeDisconnect(interaction, shoukaku, queues, leaveTimeouts, loopModes) {
     const player = shoukaku.players.get(interaction.guildId);
     if (!player) return interaction.reply({ content: 'บอทยังไม่ได้อยู่ในห้องเสียงเลยครับ!', ephemeral: true });
 
@@ -183,7 +217,9 @@ async function executeDisconnect(interaction, shoukaku, queues, leaveTimeouts) {
 
     clearLeaveTimer(interaction.guildId, leaveTimeouts);
 
+    // ล้างข้อมูลทุกอย่าง
     queues.delete(interaction.guildId);
+    loopModes.delete(interaction.guildId);
     await shoukaku.leaveVoiceChannel(interaction.guildId);
     
     return interaction.reply('ไปก่อนนะ บาย');
@@ -193,5 +229,6 @@ module.exports = {
     executePlay,
     executeQueue,
     executeSkip,
-    executeDisconnect
+    executeDisconnect,
+    executeLoop 
 };
