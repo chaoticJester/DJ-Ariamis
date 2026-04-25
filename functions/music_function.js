@@ -1,7 +1,36 @@
 const { EmbedBuilder } = require('discord.js');
 
 // ==========================================
-// Helper: Format milliseconds to mm:ss or hh:mm:ss
+// Persistent message stores per guild
+// ==========================================
+const nowPlayingMessages = new Map(); // guildId -> Message (permanent, gets edited)
+const queueEmptyMessages = new Map(); // guildId -> Message (stays until new song added)
+
+// ==========================================
+// Helper: Send a temp message that auto-deletes after 5 seconds
+// ==========================================
+async function sendTemp(channel, embed) {
+    try {
+        const msg = await channel.send({ embeds: [embed] });
+        setTimeout(() => msg.delete().catch(() => {}), 5000);
+    } catch (err) {
+        console.error('[sendTemp] Error:', err);
+    }
+}
+
+// Helper: Reply to interaction with a temp message that auto-deletes after 5 seconds
+async function replyTemp(interaction, embed) {
+    try {
+        await interaction.reply({ embeds: [embed] });
+        const msg = await interaction.fetchReply();
+        setTimeout(() => msg.delete().catch(() => {}), 5000);
+    } catch (err) {
+        console.error('[replyTemp] Error:', err);
+    }
+}
+
+// ==========================================
+// Helper: Format milliseconds → mm:ss or hh:mm:ss
 // ==========================================
 function formatDuration(ms) {
     if (!ms || ms <= 0) return 'Live 🔴';
@@ -15,10 +44,20 @@ function formatDuration(ms) {
     return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
+// Helper: Build progress bar  e.g.  `0:00` ▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱ `3:45`
+function buildProgressBar(currentMs, totalMs, barLength = 15) {
+    if (!totalMs || totalMs <= 0) return '🔴 Live';
+    const progress = Math.min(currentMs / totalMs, 1);
+    const filled = Math.round(progress * barLength);
+    const empty = barLength - filled;
+    const bar = '▰'.repeat(filled) + '▱'.repeat(empty);
+    return `\`${formatDuration(currentMs)}\` ${bar} \`${formatDuration(totalMs)}\``;
+}
+
 // Helper: Detect source platform from URI
 function getSourceLabel(uri = '') {
-    if (uri.includes('youtube.com') || uri.includes('youtu.be')) return '🎬 YouTube';
     if (uri.includes('music.youtube.com')) return '🎵 YouTube Music';
+    if (uri.includes('youtube.com') || uri.includes('youtu.be')) return '🎬 YouTube';
     if (uri.includes('soundcloud.com')) return '☁️ SoundCloud';
     if (uri.includes('spotify.com')) return '🟢 Spotify';
     if (uri.includes('twitch.tv')) return '🟣 Twitch';
@@ -45,25 +84,24 @@ function clearLeaveTimer(guildId, leaveTimeouts) {
 // Helper: Start 5-minute leave timer
 function startLeaveTimer(guildId, shoukaku, queues, leaveTimeouts, channel) {
     clearLeaveTimer(guildId, leaveTimeouts);
-
     const timeout = setTimeout(async () => {
         const player = shoukaku.players.get(guildId);
         if (player) {
             await shoukaku.leaveVoiceChannel(guildId);
             queues.delete(guildId);
             leaveTimeouts.delete(guildId);
+            nowPlayingMessages.delete(guildId);
+            queueEmptyMessages.delete(guildId);
 
             const embed = new EmbedBuilder()
                 .setColor(0xE74C3C)
                 .setTitle('⏳ ออกจากห้องเสียงแล้ว')
                 .setDescription('ไม่มีเพลงเล่นเกิน **5 นาที** ผมขอตัวออกก่อนนะครับ บาย~ 👋')
                 .setTimestamp();
-
             channel.send({ embeds: [embed] });
             console.log(`[Auto-Leave] ออกจากห้อง ${guildId} เพราะไม่มีเพลงเล่น`);
         }
     }, 5 * 60 * 1000);
-
     leaveTimeouts.set(guildId, timeout);
 }
 
@@ -72,13 +110,9 @@ function startLeaveTimer(guildId, shoukaku, queues, leaveTimeouts, channel) {
 // ==========================================
 function extractTrackInfo(result) {
     let trackData;
-    if (result.loadType === 'playlist') {
-        trackData = result.data.tracks[0];
-    } else if (result.loadType === 'search') {
-        trackData = result.data[0];
-    } else if (result.loadType === 'track') {
-        trackData = result.data;
-    }
+    if (result.loadType === 'playlist') trackData = result.data.tracks[0];
+    else if (result.loadType === 'search') trackData = result.data[0];
+    else if (result.loadType === 'track') trackData = result.data;
 
     const info = trackData?.info || {};
     return {
@@ -94,66 +128,63 @@ function extractTrackInfo(result) {
 }
 
 // ==========================================
-// Build "Now Playing" embed
+// Build "Now Playing" embed (permanent, gets edited in-place)
 // ==========================================
-function buildNowPlayingEmbed(track, queueLength, loopMode, isAutoPlay = false) {
-    const loopLabel = getLoopLabel(loopMode);
-    const sourceLabel = getSourceLabel(track.uri);
-    const duration = track.isStream ? 'Live 🔴' : formatDuration(track.duration);
+function buildNowPlayingEmbed(track, queueLength, loopMode, currentMs = 0, isAutoPlay = false) {
+    const progressBar = track.isStream ? '🔴 Live' : buildProgressBar(currentMs, track.duration);
 
     const embed = new EmbedBuilder()
         .setColor(0x9B59B6)
         .setTitle('🎵 กำลังเล่นอยู่ตอนนี้')
         .setDescription(`### [${track.title}](${track.uri})`)
         .addFields(
-            { name: '🎤 ศิลปิน', value: track.author, inline: true },
-            { name: '⏱️ ความยาว', value: duration, inline: true },
-            { name: '📡 แหล่งที่มา', value: sourceLabel, inline: true },
-            { name: '👤 รีเควสโดย', value: track.requester, inline: true },
-            { name: '📋 เพลงในคิว', value: `${Math.max(0, queueLength - 1)} เพลง`, inline: true },
-            { name: '🔁 โหมดลูป', value: loopLabel, inline: true },
+            { name: '🎤 ศิลปิน',      value: track.author,                            inline: true  },
+            { name: '📡 แหล่งที่มา',   value: getSourceLabel(track.uri),               inline: true  },
+            { name: '👤 รีเควสโดย',    value: track.requester,                         inline: true  },
+            { name: '⏱️ ความคืบหน้า', value: progressBar,                             inline: false },
+            { name: '📋 เพลงในคิว',    value: `${Math.max(0, queueLength - 1)} เพลง`, inline: true  },
+            { name: '🔁 โหมดลูป',      value: getLoopLabel(loopMode),                  inline: true  },
         )
         .setTimestamp()
         .setFooter({ text: isAutoPlay ? 'เล่นต่อจากคิวอัตโนมัติ' : 'Alan The Grandmaster 🎶' });
 
-    if (track.artworkUrl) {
-        embed.setThumbnail(track.artworkUrl);
-    }
-
+    if (track.artworkUrl) embed.setThumbnail(track.artworkUrl);
     return embed;
 }
 
-// Build "Added to Queue" embed
-function buildAddedToQueueEmbed(track, position) {
-    const duration = track.isStream ? 'Live 🔴' : formatDuration(track.duration);
-    const sourceLabel = getSourceLabel(track.uri);
-
-    const embed = new EmbedBuilder()
-        .setColor(0x3498DB)
-        .setTitle('➕ เพิ่มลงคิวแล้ว')
-        .setDescription(`### [${track.title}](${track.uri})`)
-        .addFields(
-            { name: '🎤 ศิลปิน', value: track.author, inline: true },
-            { name: '⏱️ ความยาว', value: duration, inline: true },
-            { name: '📡 แหล่งที่มา', value: sourceLabel, inline: true },
-            { name: '👤 รีเควสโดย', value: track.requester, inline: true },
-            { name: '🔢 ตำแหน่งในคิว', value: `#${position}`, inline: true },
-        )
-        .setTimestamp()
-        .setFooter({ text: 'Alan The Grandmaster 🎶' });
-
-    if (track.artworkUrl) {
-        embed.setThumbnail(track.artworkUrl);
+// ==========================================
+// Helper: Edit the stored Now Playing message in-place.
+// If it was deleted, send a fresh one and store it.
+// ==========================================
+async function updateNowPlayingMessage(guildId, channel, embed) {
+    const existing = nowPlayingMessages.get(guildId);
+    if (existing) {
+        try {
+            await existing.edit({ embeds: [embed] });
+            return existing;
+        } catch {
+            nowPlayingMessages.delete(guildId);
+        }
     }
+    const newMsg = await channel.send({ embeds: [embed] });
+    nowPlayingMessages.set(guildId, newMsg);
+    return newMsg;
+}
 
-    return embed;
+// Helper: Delete the "queue empty" message if it's still there
+async function clearQueueEmptyMessage(guildId) {
+    const msg = queueEmptyMessages.get(guildId);
+    if (msg) {
+        try { await msg.delete(); } catch { /* already deleted */ }
+        queueEmptyMessages.delete(guildId);
+    }
 }
 
 // ==========================================
 // PLAY
 // ==========================================
 async function executePlay(interaction, shoukaku, queues, leaveTimeouts, loopModes) {
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral: true });
     clearLeaveTimer(interaction.guildId, leaveTimeouts);
 
     const query = interaction.options.getString('song');
@@ -217,18 +248,17 @@ async function executePlay(interaction, shoukaku, queues, leaveTimeouts, loopMod
 
             await new Promise(resolve => setTimeout(resolve, 500));
 
-            player.on('end', (payload) => {
+            player.on('end', async (payload) => {
                 if (payload.reason === 'finished') {
                     const currentLoop = loopModes.get(interaction.guildId) || 'OFF';
                     const serverQueue = queues.get(interaction.guildId);
-
                     if (!serverQueue) return;
 
                     if (currentLoop === 'SONG') {
-                        // Keep serverQueue[0]
+                        // keep serverQueue[0], replay same
                     } else if (currentLoop === 'QUEUE') {
-                        const finishedSong = serverQueue.shift();
-                        serverQueue.push(finishedSong);
+                        const done = serverQueue.shift();
+                        serverQueue.push(done);
                     } else {
                         serverQueue.shift();
                     }
@@ -238,21 +268,30 @@ async function executePlay(interaction, shoukaku, queues, leaveTimeouts, loopMod
                         player.playTrack({ track: { encoded: nextTrack.encoded } });
 
                         const loopMode = loopModes.get(interaction.guildId) || 'OFF';
-                        const embed = buildNowPlayingEmbed(nextTrack, serverQueue.length, loopMode, true);
-                        interaction.channel.send({ embeds: [embed] });
+                        const embed = buildNowPlayingEmbed(nextTrack, serverQueue.length, loopMode, 0, true);
+
+                        // ✅ Edit existing Now Playing message — no new message
+                        await updateNowPlayingMessage(interaction.guildId, interaction.channel, embed);
                     } else {
+                        // Queue empty — delete Now Playing, show persistent queue empty notice
+                        nowPlayingMessages.delete(interaction.guildId);
+
                         const embed = new EmbedBuilder()
                             .setColor(0xE67E22)
                             .setTitle('📭 คิวเพลงหมดแล้ว')
-                            .setDescription('ไม่มีเพลงในคิวแล้วครับ ถ้าไม่มีเพลงเพิ่มใน **5 นาที** ผมจะออกจากห้องนะ')
+                            .setDescription('ไม่มีเพลงในคิวแล้วครับ\nถ้าไม่มีเพลงเพิ่มใน **5 นาที** ผมจะออกจากห้องนะ')
                             .setTimestamp();
-                        interaction.channel.send({ embeds: [embed] });
+
+                        // This message stays until a new song is added
+                        const emptyMsg = await interaction.channel.send({ embeds: [embed] });
+                        queueEmptyMessages.set(interaction.guildId, emptyMsg);
+
                         startLeaveTimer(interaction.guildId, shoukaku, queues, leaveTimeouts, interaction.channel);
                     }
                 }
             });
 
-            player.on('error', (err) => console.error('เกิดข้อผิดพลาดกับ Player: ', err));
+            player.on('error', (err) => console.error('เกิดข้อผิดพลาดกับ Player:', err));
         }
 
         if (!queues.has(interaction.guildId)) {
@@ -262,23 +301,56 @@ async function executePlay(interaction, shoukaku, queues, leaveTimeouts, loopMod
         const serverQueue = queues.get(interaction.guildId);
         serverQueue.push(newTrack);
 
+        // Dismiss the ephemeral defer silently
+        await interaction.editReply({ content: '✅', embeds: [] });
+
         if (serverQueue.length === 1) {
+            // ── First song: delete "queue empty" notice if present, send Now Playing ──
+            await clearQueueEmptyMessage(interaction.guildId);
+
             try {
                 await player.playTrack({ track: { encoded: serverQueue[0].encoded } });
                 const loopMode = loopModes.get(interaction.guildId) || 'OFF';
-                const embed = buildNowPlayingEmbed(serverQueue[0], serverQueue.length, loopMode);
-                interaction.editReply({ embeds: [embed] });
+                const embed = buildNowPlayingEmbed(serverQueue[0], serverQueue.length, loopMode, 0, false);
+
+                const nowPlayingMsg = await interaction.channel.send({ embeds: [embed] });
+                nowPlayingMessages.set(interaction.guildId, nowPlayingMsg);
+
             } catch (playErr) {
-                console.error('Failed to play track immediately:', playErr);
-                interaction.editReply({ embeds: [
+                console.error('Failed to play track:', playErr);
+                await sendTemp(interaction.channel,
                     new EmbedBuilder().setColor(0xE74C3C).setDescription('❌ เกิดข้อผิดพลาดในการเล่นเพลงครับ')
-                ]});
+                );
                 serverQueue.shift();
             }
+
         } else {
+            // ── Added to queue: send temp message (5s), then edit Now Playing queue count ──
             const position = serverQueue.length - 1;
-            const embed = buildAddedToQueueEmbed(newTrack, position);
-            interaction.editReply({ embeds: [embed] });
+            const addedEmbed = new EmbedBuilder()
+                .setColor(0x3498DB)
+                .setTitle('➕ เพิ่มลงคิวแล้ว')
+                .setDescription(`### [${newTrack.title}](${newTrack.uri})`)
+                .addFields(
+                    { name: '🎤 ศิลปิน',       value: newTrack.author,                       inline: true },
+                    { name: '⏱️ ความยาว',      value: formatDuration(newTrack.duration),      inline: true },
+                    { name: '📡 แหล่งที่มา',    value: getSourceLabel(newTrack.uri),           inline: true },
+                    { name: '👤 รีเควสโดย',     value: newTrack.requester,                    inline: true },
+                    { name: '🔢 ตำแหน่งในคิว', value: `#${position}`,                        inline: true },
+                )
+                .setTimestamp()
+                .setFooter({ text: '🗑️ หายไปใน 5 วินาที' });
+
+            if (newTrack.artworkUrl) addedEmbed.setThumbnail(newTrack.artworkUrl);
+
+            // Temp "Added to Queue" — gone in 5s
+            await sendTemp(interaction.channel, addedEmbed);
+
+            // Edit the permanent Now Playing to show updated queue count
+            const currentTrack = serverQueue[0];
+            const loopMode = loopModes.get(interaction.guildId) || 'OFF';
+            const nowPlayingEmbed = buildNowPlayingEmbed(currentTrack, serverQueue.length, loopMode, 0, false);
+            await updateNowPlayingMessage(interaction.guildId, interaction.channel, nowPlayingEmbed);
         }
 
     } catch (error) {
@@ -290,15 +362,15 @@ async function executePlay(interaction, shoukaku, queues, leaveTimeouts, loopMod
 }
 
 // ==========================================
-// QUEUE
+// QUEUE — temp message, deletes after 5s
 // ==========================================
 async function executeQueue(interaction, queues) {
     const serverQueue = queues.get(interaction.guildId);
 
     if (!serverQueue || serverQueue.length === 0) {
-        return interaction.reply({ embeds: [
+        return replyTemp(interaction,
             new EmbedBuilder().setColor(0xE67E22).setDescription('📭 ตอนนี้ยังไม่มีเพลงในคิวครับ')
-        ]});
+        );
     }
 
     const nowPlaying = serverQueue[0];
@@ -308,64 +380,55 @@ async function executeQueue(interaction, queues) {
         ? upcoming.slice(0, 10).map((t, i) => `\`${i + 1}.\` [${t.title}](${t.uri || '#'}) — ${t.requester}`).join('\n')
         : '*ไม่มีเพลงในคิว*';
 
-    if (upcoming.length > 10) {
-        upcomingText += `\n*...และอีก ${upcoming.length - 10} เพลง*`;
-    }
+    if (upcoming.length > 10) upcomingText += `\n*...และอีก ${upcoming.length - 10} เพลง*`;
 
     const embed = new EmbedBuilder()
         .setColor(0x9B59B6)
         .setTitle('📋 รายการเพลงในคิว')
         .addFields(
-            {
-                name: '🎵 กำลังเล่นอยู่',
-                value: `[${nowPlaying.title}](${nowPlaying.uri || '#'}) — ${nowPlaying.requester}`,
-            },
-            {
-                name: `⏭️ เพลงถัดไป (${upcoming.length} เพลง)`,
-                value: upcomingText,
-            }
+            { name: '🎵 กำลังเล่นอยู่', value: `[${nowPlaying.title}](${nowPlaying.uri || '#'}) — ${nowPlaying.requester}` },
+            { name: `⏭️ เพลงถัดไป (${upcoming.length} เพลง)`, value: upcomingText },
         )
         .setTimestamp()
-        .setFooter({ text: `รวมทั้งหมด ${serverQueue.length} เพลง` });
+        .setFooter({ text: `รวมทั้งหมด ${serverQueue.length} เพลง • 🗑️ หายไปใน 5 วินาที` });
 
     if (nowPlaying.artworkUrl) embed.setThumbnail(nowPlaying.artworkUrl);
-
-    interaction.reply({ embeds: [embed] });
+    replyTemp(interaction, embed);
 }
 
 // ==========================================
-// SKIP
+// SKIP — temp message, then edit Now Playing
 // ==========================================
 async function executeSkip(interaction, shoukaku, queues, leaveTimeouts, loopModes) {
     const player = shoukaku.players.get(interaction.guildId);
     if (!player) {
-        return interaction.reply({ embeds: [
+        return replyTemp(interaction,
             new EmbedBuilder().setColor(0xE74C3C).setDescription('❌ ตอนนี้บอทยังไม่ได้เล่นเพลงอะไรเลยครับ!')
-        ], ephemeral: true });
+        );
     }
 
     const userVoiceChannel = interaction.member.voice.channel;
     const botVoiceChannel = interaction.guild.members.me.voice.channel;
 
     if (!userVoiceChannel || (botVoiceChannel && userVoiceChannel.id !== botVoiceChannel.id)) {
-        return interaction.reply({ embeds: [
+        return replyTemp(interaction,
             new EmbedBuilder().setColor(0xE74C3C).setDescription('❌ คุณต้องอยู่ในห้องเสียงเดียวกับผมถึงจะสั่งข้ามเพลงได้ครับ!')
-        ], ephemeral: true });
+        );
     }
 
     const serverQueue = queues.get(interaction.guildId);
     if (!serverQueue || serverQueue.length <= 1) {
-        return interaction.reply({ embeds: [
+        return replyTemp(interaction,
             new EmbedBuilder().setColor(0xE67E22).setDescription('⚠️ ไม่มีเพลงในคิวให้ข้ามครับ!')
-        ]});
+        );
     }
 
     const skippedTrack = serverQueue[0];
     const currentLoop = loopModes.get(interaction.guildId) || 'OFF';
 
     if (currentLoop === 'QUEUE') {
-        const skippedSong = serverQueue.shift();
-        serverQueue.push(skippedSong);
+        const done = serverQueue.shift();
+        serverQueue.push(done);
     } else {
         serverQueue.shift();
     }
@@ -374,87 +437,120 @@ async function executeSkip(interaction, shoukaku, queues, leaveTimeouts, loopMod
         const nextTrack = serverQueue[0];
         await player.playTrack({ track: { encoded: nextTrack.encoded } });
 
-        const loopMode = loopModes.get(interaction.guildId) || 'OFF';
-        const embed = new EmbedBuilder()
+        // Temp "skipped" notice — gone in 5s
+        const skipEmbed = new EmbedBuilder()
             .setColor(0xE67E22)
             .setTitle('⏭️ ข้ามเพลงแล้ว')
-            .addFields(
-                { name: '⏭️ ข้ามเพลง', value: skippedTrack.title, inline: false },
-                { name: '🎵 กำลังเล่น', value: `[${nextTrack.title}](${nextTrack.uri || '#'})`, inline: false },
-                { name: '🎤 ศิลปิน', value: nextTrack.author, inline: true },
-                { name: '⏱️ ความยาว', value: formatDuration(nextTrack.duration), inline: true },
-                { name: '👤 รีเควสโดย', value: nextTrack.requester, inline: true },
-                { name: '🔁 โหมดลูป', value: getLoopLabel(loopMode), inline: true },
-                { name: '📋 เพลงในคิว', value: `${Math.max(0, serverQueue.length - 1)} เพลง`, inline: true },
-            )
+            .setDescription(`ข้าม **${skippedTrack.title}** แล้วครับ`)
             .setTimestamp()
-            .setFooter({ text: `สั่งข้ามโดย ${interaction.user.username}` });
+            .setFooter({ text: `สั่งข้ามโดย ${interaction.user.username} • 🗑️ หายไปใน 5 วินาที` });
+        await replyTemp(interaction, skipEmbed);
 
-        if (nextTrack.artworkUrl) embed.setThumbnail(nextTrack.artworkUrl);
+        // Edit Now Playing to show the new song
+        const loopMode = loopModes.get(interaction.guildId) || 'OFF';
+        const nowPlayingEmbed = buildNowPlayingEmbed(nextTrack, serverQueue.length, loopMode, 0, false);
+        await updateNowPlayingMessage(interaction.guildId, interaction.channel, nowPlayingEmbed);
 
-        interaction.reply({ embeds: [embed] });
     } else {
         await player.stopTrack();
-        const embed = new EmbedBuilder()
-            .setColor(0xE67E22)
-            .setTitle('⏭️ ข้ามเพลงแล้ว — คิวว่างเปล่า')
-            .setDescription(`ข้าม **${skippedTrack.title}** แล้ว ตอนนี้คิวว่างเปล่าครับ\nถ้าไม่มีเพลงเพิ่มใน **5 นาที** ผมจะออกจากห้องนะ`)
-            .setTimestamp()
-            .setFooter({ text: `สั่งข้ามโดย ${interaction.user.username}` });
+        nowPlayingMessages.delete(interaction.guildId);
 
-        interaction.reply({ embeds: [embed] });
+        // Temp skip notice
+        const skipEmbed = new EmbedBuilder()
+            .setColor(0xE67E22)
+            .setTitle('⏭️ ข้ามเพลงแล้ว')
+            .setDescription(`ข้าม **${skippedTrack.title}** แล้วครับ`)
+            .setTimestamp()
+            .setFooter({ text: `สั่งข้ามโดย ${interaction.user.username} • 🗑️ หายไปใน 5 วินาที` });
+        await replyTemp(interaction, skipEmbed);
+
+        // Persistent queue empty notice
+        const emptyEmbed = new EmbedBuilder()
+            .setColor(0xE67E22)
+            .setTitle('📭 คิวเพลงหมดแล้ว')
+            .setDescription('ไม่มีเพลงในคิวแล้วครับ\nถ้าไม่มีเพลงเพิ่มใน **5 นาที** ผมจะออกจากห้องนะ')
+            .setTimestamp();
+
+        const emptyMsg = await interaction.channel.send({ embeds: [emptyEmbed] });
+        queueEmptyMessages.set(interaction.guildId, emptyMsg);
+
         startLeaveTimer(interaction.guildId, shoukaku, queues, leaveTimeouts, interaction.channel);
     }
 }
 
 // ==========================================
-// LOOP
+// NOW PLAYING — on-demand with live position
+// ==========================================
+async function executeNowPlaying(interaction, shoukaku, queues, loopModes) {
+    const player = shoukaku.players.get(interaction.guildId);
+    const serverQueue = queues.get(interaction.guildId);
+
+    if (!player || !serverQueue || serverQueue.length === 0) {
+        return replyTemp(interaction,
+            new EmbedBuilder().setColor(0xE74C3C).setDescription('❌ ตอนนี้ไม่มีเพลงเล่นอยู่ครับ')
+        );
+    }
+
+    const currentTrack = serverQueue[0];
+    const currentMs = player.position ?? 0;
+    const loopMode = loopModes.get(interaction.guildId) || 'OFF';
+    const embed = buildNowPlayingEmbed(currentTrack, serverQueue.length, loopMode, currentMs, false);
+
+    // Send fresh Now Playing and store it as the new permanent message
+    await interaction.reply({ embeds: [embed] });
+    const replyMsg = await interaction.fetchReply();
+    nowPlayingMessages.set(interaction.guildId, replyMsg);
+}
+
+// ==========================================
+// LOOP — temp message
 // ==========================================
 async function executeLoop(interaction, loopModes) {
     const mode = interaction.options.getString('mode');
     loopModes.set(interaction.guildId, mode);
 
-    const descriptions = {
-        'OFF':   { label: '➡️ ปิดการวนซ้ำ', color: 0x95A5A6, desc: 'ปิดการวนซ้ำเรียบร้อยแล้วครับ' },
+    const config = {
+        'OFF':   { label: '➡️ ปิดการวนซ้ำ',    color: 0x95A5A6, desc: 'ปิดการวนซ้ำเรียบร้อยแล้วครับ' },
         'SONG':  { label: '🔂 วนซ้ำเพลงเดียว', color: 0x3498DB, desc: 'ตั้งค่าวนซ้ำ **เพลงเดียว** เรียบร้อยแล้วครับ' },
-        'QUEUE': { label: '🔁 วนซ้ำทั้งคิว', color: 0x9B59B6, desc: 'ตั้งค่าวนซ้ำ **ทั้งคิว** เรียบร้อยแล้วครับ' },
+        'QUEUE': { label: '🔁 วนซ้ำทั้งคิว',   color: 0x9B59B6, desc: 'ตั้งค่าวนซ้ำ **ทั้งคิว** เรียบร้อยแล้วครับ' },
     };
 
-    const { label, color, desc } = descriptions[mode];
-
+    const { label, color, desc } = config[mode];
     const embed = new EmbedBuilder()
         .setColor(color)
         .setTitle(label)
         .setDescription(desc)
         .setTimestamp()
-        .setFooter({ text: `ตั้งค่าโดย ${interaction.user.username}` });
+        .setFooter({ text: `ตั้งค่าโดย ${interaction.user.username} • 🗑️ หายไปใน 5 วินาที` });
 
-    interaction.reply({ embeds: [embed] });
+    replyTemp(interaction, embed);
 }
 
 // ==========================================
-// DISCONNECT
+// DISCONNECT — temp message
 // ==========================================
 async function executeDisconnect(interaction, shoukaku, queues, leaveTimeouts, loopModes) {
     const player = shoukaku.players.get(interaction.guildId);
     if (!player) {
-        return interaction.reply({ embeds: [
+        return replyTemp(interaction,
             new EmbedBuilder().setColor(0xE74C3C).setDescription('❌ บอทยังไม่ได้อยู่ในห้องเสียงเลยครับ!')
-        ], ephemeral: true });
+        );
     }
 
     const userVoiceChannel = interaction.member.voice.channel;
     const botVoiceChannel = interaction.guild.members.me.voice.channel;
 
     if (!userVoiceChannel || (botVoiceChannel && userVoiceChannel.id !== botVoiceChannel.id)) {
-        return interaction.reply({ embeds: [
+        return replyTemp(interaction,
             new EmbedBuilder().setColor(0xE74C3C).setDescription('❌ คุณต้องอยู่ในห้องเสียงเดียวกับผมถึงจะสั่งให้ออกได้ครับ!')
-        ], ephemeral: true });
+        );
     }
 
     clearLeaveTimer(interaction.guildId, leaveTimeouts);
     queues.delete(interaction.guildId);
     loopModes.delete(interaction.guildId);
+    nowPlayingMessages.delete(interaction.guildId);
+    await clearQueueEmptyMessage(interaction.guildId);
     await shoukaku.leaveVoiceChannel(interaction.guildId);
 
     const embed = new EmbedBuilder()
@@ -462,9 +558,9 @@ async function executeDisconnect(interaction, shoukaku, queues, leaveTimeouts, l
         .setTitle('👋 ออกจากห้องเสียงแล้ว')
         .setDescription('ล้างคิวและออกจากห้องเรียบร้อยแล้วครับ ไปก่อนนะ บาย~ 👋')
         .setTimestamp()
-        .setFooter({ text: `สั่งโดย ${interaction.user.username}` });
+        .setFooter({ text: `สั่งโดย ${interaction.user.username} • 🗑️ หายไปใน 5 วินาที` });
 
-    return interaction.reply({ embeds: [embed] });
+    replyTemp(interaction, embed);
 }
 
 module.exports = {
@@ -472,5 +568,6 @@ module.exports = {
     executeQueue,
     executeSkip,
     executeDisconnect,
-    executeLoop
+    executeLoop,
+    executeNowPlaying,
 };
