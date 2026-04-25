@@ -26,14 +26,14 @@ function startLeaveTimer(guildId, shoukaku, queues, leaveTimeouts, channel) {
 
 // ==========================================
 
+// Function signature mapping the objects in your script 
 async function executePlay(interaction, shoukaku, queues, leaveTimeouts, loopModes) {
     await interaction.deferReply();
-
     clearLeaveTimer(interaction.guildId, leaveTimeouts);
 
-    const query = interaction.options.getString('song'); 
+    const query = interaction.options.getString('song');
     const voiceChannel = interaction.member.voice.channel;
-    
+
     if (!voiceChannel) return interaction.editReply('คุณต้องเข้าห้องเสียง (Voice Channel) ก่อนครับ!');
 
     const node = shoukaku.options.nodeResolver(shoukaku.nodes);
@@ -41,7 +41,7 @@ async function executePlay(interaction, shoukaku, queues, leaveTimeouts, loopMod
 
     try {
         const isUrl = query.startsWith('http://') || query.startsWith('https://');
-        let result = null; 
+        let result = null;
 
         if (isUrl) {
             result = await node.rest.resolve(query);
@@ -51,7 +51,7 @@ async function executePlay(interaction, shoukaku, queues, leaveTimeouts, loopMod
                 const tempResult = await node.rest.resolve(`${prefix}${query}`);
                 if (tempResult && tempResult.loadType !== 'empty' && tempResult.loadType !== 'error') {
                     result = tempResult;
-                    break; 
+                    break;
                 }
             }
         }
@@ -76,47 +76,50 @@ async function executePlay(interaction, shoukaku, queues, leaveTimeouts, loopMod
         const newTrack = {
             encoded: trackToPlay,
             title: title,
-            requester: interaction.user.username 
+            requester: interaction.user.username
         };
-
-        if(!queues.has(interaction.guildId)) {
-            queues.set(interaction.guildId, []);
-        }
-
-        const serverQueue = queues.get(interaction.guildId);
-        serverQueue.push(newTrack);
 
         let player = shoukaku.players.get(interaction.guildId);
 
+        // 1. Establish the connection first if it doesn't exist
         if(!player) {
-            player = await shoukaku.joinVoiceChannel({
-                guildId: interaction.guildId,
-                channelId: voiceChannel.id,
-                shardId: interaction.guild.shardId || 0
-            });
+		
+            try {
+                player = await shoukaku.joinVoiceChannel({
+                    guildId: interaction.guildId,
+                    channelId: voiceChannel.id,
+                    shardId: interaction.guild.shard?.id ?? 0,
+                    deaf: true
+                });
+            } catch (joinError) {
+                console.error('Failed to join voice channel:', joinError);
+                return interaction.editReply('ไม่สามารถเข้าห้องเสียงได้ครับ กรุณาลองใหม่อีกครั้ง');
+            }
+            // Wait for node stability 
+            await new Promise(resolve => setTimeout(resolve, 500));
 
             player.on('end', (payload) => {
                 if(payload.reason === 'finished') {
                     const currentLoop = loopModes.get(interaction.guildId) || 'OFF';
+                    const serverQueue = queues.get(interaction.guildId);
+
+                    if(!serverQueue) return;
 
                     if (currentLoop === 'SONG') {
-                        // ไม่ต้องลบเพลงออกจากคิว (เก็บ serverQueue[0] ไว้เหมือนเดิม)
+                        // Keep serverQueue[0]
                     } else if (currentLoop === 'QUEUE') {
-                        // ลบเพลงแรกออก แล้วเอาไปต่อท้ายคิว
                         const finishedSong = serverQueue.shift();
                         serverQueue.push(finishedSong);
                     } else {
-                        // ปิดลูป: เอาเพลงแรกออกไปเลย
                         serverQueue.shift();
                     }
 
-                    // เช็คว่ามีเพลงให้เล่นต่อไหม
                     if(serverQueue.length > 0) {
                         const nextTrack = serverQueue[0];
                         player.playTrack({track : { encoded: nextTrack.encoded }});
                         interaction.channel.send(`กำลังเล่น **${serverQueue[0].title}** นะ\nรีเควสโดย ***${serverQueue[0].requester}***`);
                     } else {
-                        interaction.channel.send('คิวเพลงหมดแล้วนะครับ (ถ้าไม่มีเพลงเพิ่มใน 5 นาทีผมจะออกจากห้องนะ)'); 
+                        interaction.channel.send('คิวเพลงหมดแล้วนะครับ (ถ้าไม่มีเพลงเพิ่มใน 5 นาทีผมจะออกจากห้องนะ)');
                         startLeaveTimer(interaction.guildId, shoukaku, queues, leaveTimeouts, interaction.channel);
                     }
                 }
@@ -125,9 +128,23 @@ async function executePlay(interaction, shoukaku, queues, leaveTimeouts, loopMod
             player.on('error', (err) => console.error('เกิดข้อผิดพลาดกับ Player: ', err));
         }
 
-        if(serverQueue.length === 1) { 
-            await player.playTrack({track: {encoded: serverQueue[0].encoded}});
-            interaction.editReply(`กำลังเล่น **${serverQueue[0].title}** นะ\nรีเควสโดย ***${serverQueue[0].requester}***`);
+        if(!queues.has(interaction.guildId)) {
+            queues.set(interaction.guildId, []);
+        }
+
+        const serverQueue = queues.get(interaction.guildId);
+        
+        serverQueue.push(newTrack);
+
+        if(serverQueue.length === 1) {
+            try {
+                await player.playTrack({track: {encoded: serverQueue[0].encoded}});
+                interaction.editReply(`กำลังเล่น **${serverQueue[0].title}** นะ\nรีเควสโดย ***${serverQueue[0].requester}***`);
+            } catch (playErr) {
+                console.error("Failed to play track immediately:", playErr);
+                interaction.editReply("เกิดข้อผิดพลาดในการเล่นเพลงครับ");
+                serverQueue.shift();
+            }
         } else {
             interaction.editReply(`เพิ่มเพลง **${newTrack.title}** ลงคิวแล้วนะ`);
         }

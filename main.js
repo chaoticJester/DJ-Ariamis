@@ -7,14 +7,17 @@ require('dotenv').config();
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildVoiceStates
+        GatewayIntentBits.GuildVoiceStates,
+	GatewayIntentBits.GuildMessages, 
+        GatewayIntentBits.MessageContent
     ]
 });
 
 const nodes = [{
     name: 'Ariamis Trianglecat The Grandmaster',
-    url: 'localhost:2333',
-    auth: process.env.LAVALINK_PASS 
+    url: 'lavalinkv4.serenetia.com',
+    auth: process.env.LAVALINK_PASS,
+    secure: true
 }];
 
 const shoukaku = new Shoukaku(new Connectors.DiscordJS(client), nodes);
