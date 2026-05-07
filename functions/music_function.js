@@ -332,9 +332,6 @@ async function executePlay(interaction, shoukaku, queues, leaveTimeouts, loopMod
         const serverQueue = queues.get(interaction.guildId);
         serverQueue.push(newTrack);
 
-        // Dismiss the ephemeral defer silently
-        await interaction.editReply({ content: '✅', embeds: [] });
-
         if (serverQueue.length === 1) {
             // ── First song: delete "queue empty" notice if present, send Now Playing ──
             await clearQueueEmptyMessage(interaction.guildId);
