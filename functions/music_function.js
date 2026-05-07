@@ -5,6 +5,7 @@ const { EmbedBuilder } = require('discord.js');
 // ==========================================
 const nowPlayingMessages = new Map(); // guildId -> Message (permanent, gets edited)
 const queueEmptyMessages = new Map(); // guildId -> Message (stays until new song added)
+const progressIntervals = new Map();  // guildId -> intervalId (live progress bar updater)
 
 // ==========================================
 // Helper: Send a temp message that auto-deletes after 5 seconds
@@ -72,6 +73,31 @@ function getLoopLabel(mode) {
 }
 
 // ==========================================
+// Helper: Start/stop live progress bar interval (updates every 15s)
+// ==========================================
+function startProgressInterval(guildId, player, queues, loopModes, channel) {
+    stopProgressInterval(guildId);
+    const interval = setInterval(async () => {
+        const serverQueue = queues.get(guildId);
+        if (!serverQueue || serverQueue.length === 0) return stopProgressInterval(guildId);
+        const currentTrack = serverQueue[0];
+        if (currentTrack.isStream) return; // no bar for live streams
+        const currentMs = player.position ?? 0;
+        const loopMode = loopModes.get(guildId) || 'OFF';
+        const embed = buildNowPlayingEmbed(currentTrack, serverQueue.length, loopMode, currentMs, false);
+        await updateNowPlayingMessage(guildId, channel, embed);
+    }, 15_000);
+    progressIntervals.set(guildId, interval);
+}
+
+function stopProgressInterval(guildId) {
+    if (progressIntervals.has(guildId)) {
+        clearInterval(progressIntervals.get(guildId));
+        progressIntervals.delete(guildId);
+    }
+}
+
+// ==========================================
 // Helper: Clear leave timer
 // ==========================================
 function clearLeaveTimer(guildId, leaveTimeouts) {
@@ -92,6 +118,7 @@ function startLeaveTimer(guildId, shoukaku, queues, leaveTimeouts, channel) {
             leaveTimeouts.delete(guildId);
             nowPlayingMessages.delete(guildId);
             queueEmptyMessages.delete(guildId);
+            stopProgressInterval(guildId);
 
             const embed = new EmbedBuilder()
                 .setColor(0xE74C3C)
@@ -272,9 +299,13 @@ async function executePlay(interaction, shoukaku, queues, leaveTimeouts, loopMod
 
                         // ✅ Edit existing Now Playing message — no new message
                         await updateNowPlayingMessage(interaction.guildId, interaction.channel, embed);
+
+                        // ✅ Restart live progress bar for the new song
+                        startProgressInterval(interaction.guildId, player, queues, loopModes, interaction.channel);
                     } else {
                         // Queue empty — delete Now Playing, show persistent queue empty notice
                         nowPlayingMessages.delete(interaction.guildId);
+                        stopProgressInterval(interaction.guildId);
 
                         const embed = new EmbedBuilder()
                             .setColor(0xE67E22)
@@ -316,6 +347,9 @@ async function executePlay(interaction, shoukaku, queues, leaveTimeouts, loopMod
                 const nowPlayingMsg = await interaction.channel.send({ embeds: [embed] });
                 nowPlayingMessages.set(interaction.guildId, nowPlayingMsg);
 
+                // ✅ Start live progress bar updates
+                startProgressInterval(interaction.guildId, player, queues, loopModes, interaction.channel);
+
             } catch (playErr) {
                 console.error('Failed to play track:', playErr);
                 await sendTemp(interaction.channel,
@@ -349,7 +383,8 @@ async function executePlay(interaction, shoukaku, queues, leaveTimeouts, loopMod
             // Edit the permanent Now Playing to show updated queue count
             const currentTrack = serverQueue[0];
             const loopMode = loopModes.get(interaction.guildId) || 'OFF';
-            const nowPlayingEmbed = buildNowPlayingEmbed(currentTrack, serverQueue.length, loopMode, 0, false);
+            const livePosition = player?.position ?? 0;
+            const nowPlayingEmbed = buildNowPlayingEmbed(currentTrack, serverQueue.length, loopMode, livePosition, false);
             await updateNowPlayingMessage(interaction.guildId, interaction.channel, nowPlayingEmbed);
         }
 
@@ -451,9 +486,13 @@ async function executeSkip(interaction, shoukaku, queues, leaveTimeouts, loopMod
         const nowPlayingEmbed = buildNowPlayingEmbed(nextTrack, serverQueue.length, loopMode, 0, false);
         await updateNowPlayingMessage(interaction.guildId, interaction.channel, nowPlayingEmbed);
 
+        // ✅ Restart live progress bar for the new song
+        startProgressInterval(interaction.guildId, player, queues, loopModes, interaction.channel);
+
     } else {
         await player.stopTrack();
         nowPlayingMessages.delete(interaction.guildId);
+        stopProgressInterval(interaction.guildId);
 
         // Temp skip notice
         const skipEmbed = new EmbedBuilder()
@@ -550,6 +589,7 @@ async function executeDisconnect(interaction, shoukaku, queues, leaveTimeouts, l
     queues.delete(interaction.guildId);
     loopModes.delete(interaction.guildId);
     nowPlayingMessages.delete(interaction.guildId);
+    stopProgressInterval(interaction.guildId);
     await clearQueueEmptyMessage(interaction.guildId);
     await shoukaku.leaveVoiceChannel(interaction.guildId);
 
